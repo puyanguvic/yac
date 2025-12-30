@@ -1,3 +1,0 @@
-setting,rms_avg_mean,bits_mean,tx_meas_mean,tx_share_mean,fail_rate
-"2-UAV, no sharing",12514.508111674388,370828.8,3862.8,0.0,1.0
-"2-UAV, event-triggered pose sharing",12503.637329303025,645945.6,3862.35,3439.5,1.0
