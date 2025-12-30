@@ -12,7 +12,7 @@ from .utils import clip_u, packet_bits
 def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
     """
     policy:
-      - 'event': send if ||y-y_prev|| > delta
+      - 'event': send if ||y-x_hat_pred|| > delta
       - 'periodic': send every M steps
       - 'random': send with prob q
     channel: Gilbert-Elliott
@@ -45,11 +45,11 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
     x_hat = x.copy()
     u_prev = np.zeros(2)
 
-    y_prev = (C @ x) + rng.normal(0.0, cfg.sigma_v, size=4)
-
     bits_used = 0
-    N_tx = 0
+    N_tx_attempt = 0
+    N_tx_delivered = 0
     qerr_acc = 0.0
+    J_cost = 0.0
 
     consecutive_bad = 0
     failed = False
@@ -60,13 +60,15 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
         chan.step()
         y = (C @ x) + rng.normal(0.0, cfg.sigma_v, size=4)
 
+        x_hat_pred = A @ x_hat + B @ u_prev
+
         bpv = cfg.bits_per_value
         if cfg.adaptive_bits:
             bpv = 6 if chan.state == 1 else cfg.bits_per_value
 
         do_tx = False
         if policy == "event":
-            do_tx = np.linalg.norm(y - y_prev) > cfg.delta
+            do_tx = np.linalg.norm(y - x_hat_pred) > cfg.delta
         elif policy == "periodic":
             do_tx = k % periodic_M == 0
         elif policy == "random":
@@ -81,22 +83,29 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
             pkt_bits = packet_bits(4, bpv, cfg.bits_per_packet_overhead)
             if bits_used + pkt_bits <= cfg.bit_budget_total:
                 bits_used += pkt_bits
-                N_tx += 1
+                N_tx_attempt += 1
                 received, _, _ = chan.transmit()
             else:
                 do_tx = False
 
         if received:
+            N_tx_delivered += 1
             yq, qe = uniform_quantize(y, bits=bpv, x_min=-50.0, x_max=50.0)
             qerr_acc += qe
             x_hat = yq.copy()
-            y_prev = y.copy()
         else:
-            x_hat = A @ x_hat + B @ u_prev
+            x_hat = x_hat_pred
+
+        tilde = x - x_hat
+        x_norm = float(np.linalg.norm(x))
+        tilde_norm = float(np.linalg.norm(tilde))
 
         e_hat = x_hat - x_ref[k]
         u = (-K @ e_hat.reshape(-1, 1)).flatten()
         u = clip_u(u, cfg.u_max)
+
+        e_true = x - x_ref[k]
+        J_cost += float(e_true.T @ cfg.Q @ e_true + u.T @ cfg.R @ u)
 
         x = A @ x + B @ u
 
@@ -116,6 +125,8 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
                 "px_ref": x_ref[k][0],
                 "py_ref": x_ref[k][2],
                 "pos_err": pos_err,
+                "x_norm": x_norm,
+                "tilde_norm": tilde_norm,
                 "ux": u[0],
                 "uy": u[1],
                 "tx": int(do_tx),
@@ -131,13 +142,17 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
     df = pd.DataFrame(rows)
     rms = math.sqrt(float(np.mean(df["pos_err"].values**2)))
     energy = float(np.sum(df["ux"].values**2 + df["uy"].values**2))
-    tx_rate = float(N_tx) / cfg.T_steps
+    tx_rate = float(N_tx_delivered) / cfg.T_steps
+    tx_attempt_rate = float(N_tx_attempt) / cfg.T_steps
     avg_qerr = float(qerr_acc / max(1, df["rx"].sum()))
     return df, {
         "rms_err": rms,
         "energy": energy,
-        "N_tx": int(N_tx),
+        "J_cost": float(J_cost),
+        "N_tx": int(N_tx_delivered),
+        "N_tx_attempt": int(N_tx_attempt),
         "tx_rate": tx_rate,
+        "tx_attempt_rate": tx_attempt_rate,
         "bits_used": int(bits_used),
         "avg_qerr": avg_qerr,
         "failed": int(failed),

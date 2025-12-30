@@ -39,9 +39,13 @@ class SimConfig:
 
     # multi-UAV
     multi_uav: bool = True
+    base_policy: str = "event"
+    base_period_M: int = 10
+    base_random_q: float = 0.2
     share_pose: bool = True
     share_policy: str = "event"
     share_period_M: int = 10
+    share_random_q: float = 0.2
     share_delta: float = 1.0
     share_bits_per_value: int = 8
 

@@ -50,9 +50,6 @@ def simulate_two_uav(cfg, base_policy: str):
     xhat1, xhat2 = x1.copy(), x2.copy()
     u1_prev, u2_prev = np.zeros(2), np.zeros(2)
 
-    y1_prev = x1 + rng.normal(0.0, cfg.sigma_v, size=4)
-    y2_prev = x2 + rng.normal(0.0, cfg.sigma_v, size=4)
-
     shared1_from2 = x2[[0, 2]].copy()
     shared2_from1 = x1[[0, 2]].copy()
     share_prev_1 = shared2_from1.copy()
@@ -67,6 +64,56 @@ def simulate_two_uav(cfg, base_policy: str):
 
     rows = []
 
+    def decide_tx(policy, y, xhat_pred, k):
+        if policy == "event":
+            return np.linalg.norm(y - xhat_pred) > cfg.delta
+        if policy == "periodic":
+            return k % cfg.base_period_M == 0
+        if policy == "random":
+            return rng.random() < cfg.base_random_q
+        raise ValueError("Unknown policy")
+
+    def meas_update(tx, chan, y, xhat_pred):
+        nonlocal bits_used, N_tx_meas
+        received = False
+        if tx:
+            pkt_bits = packet_bits(4, cfg.bits_per_value, cfg.bits_per_packet_overhead)
+            if bits_used + pkt_bits <= cfg.bit_budget_total:
+                bits_used += pkt_bits
+                N_tx_meas += 1
+                received, _, _ = chan.transmit()
+            else:
+                tx = False
+        if received:
+            yq, _ = uniform_quantize(y, bits=cfg.bits_per_value, x_min=-50.0, x_max=50.0)
+            return yq, True
+        return xhat_pred, False
+
+    def share_decision(policy, pose, pose_prev, k):
+        if policy == "event":
+            return np.linalg.norm(pose - pose_prev) > cfg.share_delta
+        if policy == "periodic":
+            return k % cfg.share_period_M == 0
+        if policy == "random":
+            return rng.random() < cfg.share_random_q
+        return False
+
+    def share_update(do_tx, chan, pose):
+        nonlocal bits_used, N_tx_share
+        received = False
+        if do_tx:
+            pkt_bits = packet_bits(2, cfg.share_bits_per_value, cfg.bits_per_packet_overhead)
+            if bits_used + pkt_bits <= cfg.bit_budget_total:
+                bits_used += pkt_bits
+                N_tx_share += 1
+                received, _, _ = chan.transmit()
+            else:
+                do_tx = False
+        if received:
+            pq, _ = uniform_quantize(pose, bits=cfg.share_bits_per_value, x_min=-50.0, x_max=250.0)
+            return pq, True
+        return None, False
+
     for k in range(cfg.T_steps):
         chan1.step()
         chan2.step()
@@ -74,68 +121,21 @@ def simulate_two_uav(cfg, base_policy: str):
         y1 = x1 + rng.normal(0.0, cfg.sigma_v, size=4)
         y2 = x2 + rng.normal(0.0, cfg.sigma_v, size=4)
 
-        def decide_tx(policy, y, y_prev, k):
-            if policy == "event":
-                return np.linalg.norm(y - y_prev) > cfg.delta
-            if policy == "periodic":
-                return k % 1 == 0
-            if policy == "random":
-                return rng.random() < 1.0
-            raise ValueError
+        xhat1_pred = A @ xhat1 + B @ u1_prev
+        xhat2_pred = A @ xhat2 + B @ u2_prev
 
-        tx1 = decide_tx("event" if base_policy == "event" else "periodic", y1, y1_prev, k)
-        tx2 = decide_tx("event" if base_policy == "event" else "periodic", y2, y2_prev, k)
+        tx1 = decide_tx(base_policy, y1, xhat1_pred, k)
+        tx2 = decide_tx(base_policy, y2, xhat2_pred, k)
 
-        def meas_update(tx, chan, y, xhat, u_prev):
-            nonlocal bits_used, N_tx_meas
-            received = False
-            if tx:
-                pkt_bits = packet_bits(4, cfg.bits_per_value, cfg.bits_per_packet_overhead)
-                if bits_used + pkt_bits <= cfg.bit_budget_total:
-                    bits_used += pkt_bits
-                    N_tx_meas += 1
-                    received, _, _ = chan.transmit()
-                else:
-                    tx = False
-            if received:
-                yq, _ = uniform_quantize(y, bits=cfg.bits_per_value, x_min=-50.0, x_max=50.0)
-                return yq, y, True
-            return (A @ xhat + B @ u_prev), y, False
-
-        xhat1, y1_prev_new, rx1 = meas_update(tx1, chan1, y1, xhat1, u1_prev)
-        xhat2, y2_prev_new, rx2 = meas_update(tx2, chan2, y2, xhat2, u2_prev)
-        y1_prev = y1_prev_new if rx1 else y1_prev
-        y2_prev = y2_prev_new if rx2 else y2_prev
+        xhat1, rx1 = meas_update(tx1, chan1, y1, xhat1_pred)
+        xhat2, rx2 = meas_update(tx2, chan2, y2, xhat2_pred)
 
         if cfg.share_pose:
             pose1 = x1[[0, 2]].copy()
             pose2 = x2[[0, 2]].copy()
 
-            def share_decision(policy, pose, pose_prev, k):
-                if policy == "event":
-                    return np.linalg.norm(pose - pose_prev) > cfg.share_delta
-                if policy == "periodic":
-                    return k % cfg.share_period_M == 0
-                return False
-
             sh1 = share_decision(cfg.share_policy, pose1, share_prev_1, k)
             sh2 = share_decision(cfg.share_policy, pose2, share_prev_2, k)
-
-            def share_update(do_tx, chan, pose):
-                nonlocal bits_used, N_tx_share
-                received = False
-                if do_tx:
-                    pkt_bits = packet_bits(2, cfg.share_bits_per_value, cfg.bits_per_packet_overhead)
-                    if bits_used + pkt_bits <= cfg.bit_budget_total:
-                        bits_used += pkt_bits
-                        N_tx_share += 1
-                        received, _, _ = chan.transmit()
-                    else:
-                        do_tx = False
-                if received:
-                    pq, _ = uniform_quantize(pose, bits=cfg.share_bits_per_value, x_min=-50.0, x_max=250.0)
-                    return pq, True
-                return None, False
 
             pq1, ok1 = share_update(sh1, chan1, pose1)
             pq2, ok2 = share_update(sh2, chan2, pose2)
@@ -188,7 +188,7 @@ def simulate_two_uav(cfg, base_policy: str):
                 "py2_ref": ref2[k][2],
                 "err2": err2,
                 "tx_meas": int(tx1) + int(tx2),
-                "tx_share": int(cfg.share_pose) * (0),
+                "tx_share": int(sh1) + int(sh2) if cfg.share_pose else 0,
                 "bits_used": int(bits_used),
                 "chan1_state": int(chan1.state),
                 "chan2_state": int(chan2.state),
