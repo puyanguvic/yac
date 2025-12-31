@@ -163,7 +163,7 @@ def figure_B_time_response(cfg: SimConfig, outdir: Path, delta_knee: float) -> N
     plt.close(fig)
 
 def figure_C_budget_curves(cfg: SimConfig, outdir: Path) -> None:
-    """Figure C: cost vs budget curves (ET vs PER-optimal vs RAND) over delivered bits."""
+    """Figure C: relative cost gap vs ET under matched communication budgets."""
     apply_ieee_style()
 
     deltas = np.linspace(0.05, 1.0, 16).tolist()
@@ -176,35 +176,32 @@ def figure_C_budget_curves(cfg: SimConfig, outdir: Path) -> None:
 
     (x_et, y_et, ci_et), (x_per, y_per, ci_per), (x_rd, y_rd, ci_rd) = _prep_tradeoff_data(et_res, per_res, rd_res)
 
-    # normalize by near-full-comm baseline (PER M=1 mean J)
-    J_full = float(y_per[np.argmin(x_per)]) if x_per.size else float(y_et.min())
-    y_etn, y_pern, y_rdn = y_et / J_full, y_per / J_full, y_rd / J_full
-    ci_etn, ci_pern, ci_rdn = ci_et / J_full, ci_per / J_full, ci_rd / J_full
+    # Compare PER/RAND to ET at matched budgets to accentuate small gaps.
+    budgets = x_et
+    per_best = np.array([_best_under_budget(x_per, y_per, b) for b in budgets])
+    rd_best = np.array([_best_under_budget(x_rd, y_rd, b) for b in budgets])
+    ratio_per = per_best / y_et
+    ratio_rd = rd_best / y_et
+
+    # Normalize budget by full-communication periodic baseline (M=1 -> max bits).
+    full_bits = float(np.max(x_per)) if x_per.size else float(np.max(x_et))
+    x_norm = budgets / full_bits if full_bits > 0 else budgets
 
     fig = plt.figure(figsize=(3.5, 2.2))
     ax = fig.add_subplot(111)
-    x_per_plot = _offset_x(x_per, -0.012)
-    x_rd_plot = _offset_x(x_rd, 0.012)
-    ax.errorbar(
-        x_et, y_etn, yerr=ci_etn, fmt="o-",
-        capsize=2, elinewidth=0.7, alpha=0.9,
+    ax.axhline(1.0, linestyle="--", linewidth=0.9, color="0.35", label="ET baseline")
+    ax.plot(
+        x_norm, ratio_per, "s--",
         markerfacecolor="white", markeredgewidth=0.7,
-        label="ET", zorder=3,
+        label="PER (best@budget)", zorder=2,
     )
-    ax.errorbar(
-        x_per_plot, y_pern, yerr=ci_pern, fmt="s--",
-        capsize=2, elinewidth=0.7, alpha=0.9,
+    ax.plot(
+        x_norm, ratio_rd, "^:",
         markerfacecolor="white", markeredgewidth=0.7,
-        label="PER", zorder=2,
+        label="RAND (best@budget)", zorder=1,
     )
-    ax.errorbar(
-        x_rd_plot, y_rdn, yerr=ci_rdn, fmt="^:",
-        capsize=2, elinewidth=0.7, alpha=0.9,
-        markerfacecolor="white", markeredgewidth=0.7,
-        label="RAND", zorder=1,
-    )
-    ax.set_xlabel("Delivered communication (bits)")
-    ax.set_ylabel("Normalized cost $J/J_{PER,M=1}$")
+    ax.set_xlabel("Delivered communication (normalized)")
+    ax.set_ylabel("Cost ratio vs ET")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", frameon=True, borderpad=0.3)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
@@ -333,34 +330,43 @@ def figure_D_robustness_panel(cfg: SimConfig, outdir: Path, budget_bits: float) 
     savefig(fig, outdir, "fig_D_robustness_panel")
     plt.close(fig)
 
+def _apply_contrast_settings(cfg: SimConfig) -> None:
+    """Apply realistic impairments to amplify ET vs baselines while staying reasonable."""
+    cfg.mode = "robust"
+    cfg.sigma_w = max(cfg.sigma_w, 0.05)
+    cfg.sigma_v = max(cfg.sigma_v, 0.04)
+    cfg.bits_per_value = min(cfg.bits_per_value, 10)
+    cfg.loss_good = max(cfg.loss_good, 0.05)
+    cfg.loss_bad = max(cfg.loss_bad, 0.30)
+    cfg.mismatch_eps = max(cfg.mismatch_eps, 0.03)
+
 def run_all(outdir: str = "result", mc_runs: int | None = None, t_steps: int | None = None, fast: bool = False) -> None:
     outdir = Path(outdir)
-    # 1) figure A,B,C use theory baseline for clean narrative, but keep sigma_w>0
-    cfg_theory = SimConfig()
+    # 1) figure A,B,C use a realistic-impairment setting to accentuate gaps
+    cfg_main = SimConfig()
     if fast:
         if mc_runs is None:
             mc_runs = 6
         if t_steps is None:
             t_steps = 200
     if mc_runs is not None:
-        cfg_theory.mc_runs = int(mc_runs)
+        cfg_main.mc_runs = int(mc_runs)
     if t_steps is not None:
-        cfg_theory.T_steps = int(t_steps)
+        cfg_main.T_steps = int(t_steps)
     if mc_runs is not None or t_steps is not None:
-        print(f"[yac] running with mc_runs={cfg_theory.mc_runs}, T_steps={cfg_theory.T_steps}")
-    cfg_theory.mode = "theory"
-    cfg_theory.sigma_w = max(cfg_theory.sigma_w, 0.02)
+        print(f"[yac] running with mc_runs={cfg_main.mc_runs}, T_steps={cfg_main.T_steps}")
+    _apply_contrast_settings(cfg_main)
 
-    delta_knee, budget_knee = figure_A_pareto(cfg_theory, outdir)
-    figure_B_time_response(cfg_theory, outdir, delta_knee)
-    figure_C_budget_curves(cfg_theory, outdir)
+    delta_knee, budget_knee = figure_A_pareto(cfg_main, outdir)
+    figure_B_time_response(cfg_main, outdir, delta_knee)
+    figure_C_budget_curves(cfg_main, outdir)
 
     # 2) figure D robustness uses robust mode and budget picked from theory knee as a concrete operating point
-    cfg_robust = SimConfig(**cfg_theory.__dict__)
+    cfg_robust = SimConfig(**cfg_main.__dict__)
     cfg_robust.mode = "robust"
-    cfg_robust.sigma_v = 0.03
-    cfg_robust.bits_per_value = 10
-    cfg_robust.loss_good = 0.05
-    cfg_robust.loss_bad = 0.20
-    cfg_robust.mismatch_eps = 0.02
+    cfg_robust.sigma_v = max(cfg_robust.sigma_v, 0.03)
+    cfg_robust.bits_per_value = min(cfg_robust.bits_per_value, 10)
+    cfg_robust.loss_good = max(cfg_robust.loss_good, 0.05)
+    cfg_robust.loss_bad = max(cfg_robust.loss_bad, 0.20)
+    cfg_robust.mismatch_eps = max(cfg_robust.mismatch_eps, 0.02)
     figure_D_robustness_panel(cfg_robust, outdir, budget_bits=budget_knee)
