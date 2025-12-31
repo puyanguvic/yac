@@ -71,7 +71,7 @@ def figure_A_pareto(cfg: SimConfig, outdir: Path) -> tuple[float, float]:
 
     fig = plt.figure(figsize=(3.5, 2.4))
     ax = fig.add_subplot(111)
-    ax.errorbar(x_et, y_et, yerr=ci_et, fmt="o-", capsize=2, label="ET (sweep $\delta$)")
+    ax.errorbar(x_et, y_et, yerr=ci_et, fmt="o-", capsize=2, label=r"ET (sweep $\delta$)")
     ax.errorbar(x_per, y_per, yerr=ci_per, fmt="s-", capsize=2, label="PER (sweep $M$)")
     ax.errorbar(x_rd, y_rd, yerr=ci_rd, fmt="^-", capsize=2, label="RAND (sweep $p$)")
     ax.plot([budget_knee], [y_et[knee_idx]], marker="D", linestyle="None", markersize=5, label="ET knee")
@@ -107,13 +107,13 @@ def figure_B_time_response(cfg: SimConfig, outdir: Path, delta_knee: float) -> N
     ax1 = fig.add_subplot(211)
     ax2 = fig.add_subplot(212, sharex=ax1)
 
-    ax1.plot(t, x_norm, label="$\|x_k\|_2$")
-    ax1.set_ylabel("$\|x_k\|_2$")
+    ax1.plot(t, x_norm, label=r"$\|x_k\|_2$")
+    ax1.set_ylabel(r"$\|x_k\|_2$")
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc="best", frameon=True, borderpad=0.3)
 
-    ax2.plot(t, e_norm, label="$\|\~x_k^{pred}\|_2$")
-    ax2.axhline(cfg1.delta, linestyle="--", linewidth=0.9, label="$\delta$")
+    ax2.plot(t, e_norm, label=r"$\|\tilde{x}_k^{pred}\|_2$")
+    ax2.axhline(cfg1.delta, linestyle="--", linewidth=0.9, label=r"$\delta$")
     # tx markers at bottom
     idx = np.where(tx > 0)[0]
     if idx.size > 0:
@@ -258,7 +258,7 @@ def figure_D_robustness_panel(cfg: SimConfig, outdir: Path, budget_bits: float) 
     axs[0].plot(noise_grid, et_noise, marker="o", label="ET")
     axs[0].plot(noise_grid, per_noise, marker="s", label="PER")
     axs[0].set_title("Measurement noise")
-    axs[0].set_xlabel("$\sigma_v$")
+    axs[0].set_xlabel(r"$\sigma_v$")
     axs[0].set_ylabel("Cost ratio")
     axs[0].grid(True, alpha=0.3)
 
@@ -279,7 +279,7 @@ def figure_D_robustness_panel(cfg: SimConfig, outdir: Path, budget_bits: float) 
     axs[3].plot(mismatch_grid, et_mis, marker="o", label="ET")
     axs[3].plot(mismatch_grid, per_mis, marker="s", label="PER")
     axs[3].set_title("Model mismatch")
-    axs[3].set_xlabel("$\epsilon$ in $A+\epsilon I$")
+    axs[3].set_xlabel(r"$\epsilon$ in $A+\epsilon I$")
     axs[3].grid(True, alpha=0.3)
 
     # single legend
@@ -290,10 +290,21 @@ def figure_D_robustness_panel(cfg: SimConfig, outdir: Path, budget_bits: float) 
     savefig(fig, outdir, "fig_D_robustness_panel")
     plt.close(fig)
 
-def run_all(outdir: str = "result") -> None:
+def run_all(outdir: str = "result", mc_runs: int | None = None, t_steps: int | None = None, fast: bool = False) -> None:
     outdir = Path(outdir)
     # 1) figure A,B,C use theory baseline for clean narrative, but keep sigma_w>0
     cfg_theory = SimConfig()
+    if fast:
+        if mc_runs is None:
+            mc_runs = 6
+        if t_steps is None:
+            t_steps = 200
+    if mc_runs is not None:
+        cfg_theory.mc_runs = int(mc_runs)
+    if t_steps is not None:
+        cfg_theory.T_steps = int(t_steps)
+    if mc_runs is not None or t_steps is not None:
+        print(f"[yac] running with mc_runs={cfg_theory.mc_runs}, T_steps={cfg_theory.T_steps}")
     cfg_theory.mode = "theory"
     cfg_theory.sigma_w = max(cfg_theory.sigma_w, 0.02)
 
@@ -310,4 +321,3 @@ def run_all(outdir: str = "result") -> None:
     cfg_robust.loss_bad = 0.20
     cfg_robust.mismatch_eps = 0.02
     figure_D_robustness_panel(cfg_robust, outdir, budget_bits=budget_knee)
-
