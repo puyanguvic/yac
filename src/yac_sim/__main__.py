@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from yac_sim.experiments import run_experiments
+from .experiments import run_experiments
 
 
 def main():
     output_dir = Path("result")
-    run_experiments(output_dir)
+    run_experiments(output_dir, mode='paper')
 
 
 if __name__ == "__main__":

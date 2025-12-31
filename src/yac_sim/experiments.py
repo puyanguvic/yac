@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
+from dataclasses import asdict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,7 +11,8 @@ from .config import SimConfig
 from .sim_single import simulate_single_uav
 
 
-def apply_plot_style():
+def apply_plot_style() -> None:
+    """Professional, paper-friendly Matplotlib styling."""
     try:
         plt.style.use("seaborn-v0_8-whitegrid")
     except OSError:
@@ -17,665 +21,217 @@ def apply_plot_style():
         {
             "figure.dpi": 120,
             "savefig.dpi": 300,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
-            "axes.titleweight": "bold",
-            "axes.labelsize": 11,
+            "font.size": 11,
             "axes.titlesize": 12,
-            "legend.frameon": True,
-            "legend.framealpha": 0.9,
-            "grid.alpha": 0.3,
-            "lines.linewidth": 2.0,
-            "lines.markersize": 7,
+            "axes.labelsize": 11,
+            "legend.fontsize": 10,
+            "lines.linewidth": 1.6,
+            "axes.grid": True,
+            "grid.alpha": 0.35,
         }
     )
 
 
-def save_figure(fig, path: Path):
+def save_figure(fig: plt.Figure, path: Path) -> None:
+    """Save a PNG (for quick viewing) + PDF (for submission)."""
     fig.tight_layout()
-    fig.savefig(path, bbox_inches="tight")
-
-
-def pareto_front(x_vals: np.ndarray, y_vals: np.ndarray) -> np.ndarray:
-    order = np.argsort(x_vals)
-    x_sorted = x_vals[order]
-    y_sorted = y_vals[order]
-    keep = []
-    best_y = np.inf
-    for x, y in zip(x_sorted, y_sorted):
-        if y < best_y:
-            keep.append((x, y))
-            best_y = y
-    if not keep:
-        return np.empty((0, 2))
-    return np.array(keep)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, bbox_inches="tight", dpi=300, facecolor="white")
+    if path.suffix.lower() == ".png":
+        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
+    plt.close(fig)
 
 
 def monte_carlo_single(cfg: SimConfig, policy: str, runs: int = 30, **kwargs):
     stats = []
     for i in range(runs):
-        c = SimConfig(**{**cfg.__dict__, "seed": cfg.seed + i})
+        c = SimConfig(**{**asdict(cfg), "seed": cfg.seed + i})
         _, s = simulate_single_uav(c, policy, **kwargs)
         stats.append(s)
     df = pd.DataFrame(stats)
     return df, {
-        "rms_mean": df["rms_err"].mean(),
-        "rms_std": df["rms_err"].std(),
-        "J_mean": df["J_cost"].mean(),
-        "J_std": df["J_cost"].std(),
-        "N_tx_mean": df["N_tx"].mean(),
-        "N_tx_std": df["N_tx"].std(),
-        "N_tx_attempt_mean": df["N_tx_attempt"].mean(),
-        "tx_rate_mean": df["tx_rate"].mean(),
-        "tx_attempt_rate_mean": df["tx_attempt_rate"].mean(),
-        "bits_mean": df["bits_used"].mean(),
-        "bits_std": df["bits_used"].std(),
-        "energy_mean": df["energy"].mean(),
-        "fail_rate": df["failed"].mean(),
-        "avg_qerr": df["avg_qerr"].mean(),
+        "rms_mean": float(df["rms_err"].mean()),
+        "rms_std": float(df["rms_err"].std()),
+        "J_mean": float(df["J_cost"].mean()),
+        "J_std": float(df["J_cost"].std()),
+        "N_tx_mean": float(df["N_tx"].mean()),
+        "N_tx_std": float(df["N_tx"].std()),
+        "tx_rate_mean": float(df["tx_rate"].mean()),
+        "bits_mean": float(df["bits_used"].mean()),
+        "bits_std": float(df["bits_used"].std()),
     }
 
 
-def run_experiments(output_dir: Path):
+def run_experiments(output_dir: Path, mode: str = "paper"):
+    """Entry point.
+
+    mode:
+      - "paper": generate exactly 4 publication-ready figures for the paper
+    """
+    if mode != "paper":
+        raise ValueError("Only mode='paper' is supported in this lightweight paper build.")
+    return run_experiments_paper(output_dir)
+
+
+def run_experiments_paper(output_dir: Path) -> None:
+    """Generate exactly four publication-ready figures.
+
+    Figures:
+      1) fig_pareto_tradeoff
+      2) fig_time_response
+      3) fig_periodic_comparison
+      4) fig_robustness_summary
+
+    CSVs are saved alongside the figures for reproducibility.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    for path in output_dir.iterdir():
-        if path.is_file():
-            path.unlink()
+    for p in output_dir.iterdir():
+        if p.is_file():
+            p.unlink()
+
     apply_plot_style()
+
+    # -----------------------
+    # Baseline (paper theory)
+    # -----------------------
     base = SimConfig()
-    step = 0
-    total_steps = 14
+    base.mode = "theory"
+    # Small process noise makes prediction error grow between updates (so ET is visible).
+    base.sigma_w = max(base.sigma_w, 0.02)
 
-    def log_step(title: str) -> None:
-        nonlocal step
-        step += 1
-        print(f"[{step:02d}/{total_steps:02d}] {title}")
-
-    delta_list = np.array([1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0, 10.0])
+    # ---------------------------
+    # (1) Pareto trade-off curve
+    # ---------------------------
+    delta_list = np.array([1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0, 10.0])
     pareto_rows = []
-    pareto_runs = []
-    log_step("Pareto sweep: event-triggered threshold")
-    for idx, delta in enumerate(delta_list, start=1):
-        print(f"  delta {idx}/{len(delta_list)} = {delta}")
-        cfg = SimConfig(**{**base.__dict__, "delta": delta})
-        df_runs, summ = monte_carlo_single(cfg, "event", runs=30)
+    runs_rows = []
+    for d in delta_list:
+        cfg = SimConfig(**{**asdict(base), "delta": float(d)})
+        df_runs, summ = monte_carlo_single(cfg, policy="event", runs=30)
         pareto_rows.append(
             {
-                "delta": delta,
+                "delta": float(d),
                 "J_mean": summ["J_mean"],
                 "J_std": summ["J_std"],
                 "N_tx_mean": summ["N_tx_mean"],
                 "N_tx_std": summ["N_tx_std"],
-                "tx_rate_mean": summ["tx_rate_mean"],
-                "bits_mean": summ["bits_mean"],
             }
         )
         df_runs = df_runs.copy()
-        df_runs["delta"] = delta
-        pareto_runs.append(df_runs)
-    df_pareto = pd.DataFrame(pareto_rows)
-    df_pareto.to_csv(output_dir / "exp_pareto_tradeoff.csv", index=False)
-    df_pareto_runs = pd.concat(pareto_runs, ignore_index=True)
-    df_pareto_runs.to_csv(output_dir / "exp_pareto_tradeoff_runs.csv", index=False)
+        df_runs["delta"] = float(d)
+        runs_rows.append(df_runs)
 
-    log_step("Pareto plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    df_plot = df_pareto.sort_values("N_tx_mean")
-    x_vals = df_plot["N_tx_mean"].to_numpy()
-    y_vals = df_plot["J_mean"].to_numpy()
-    color = "tab:blue"
-    ax.plot(
-        x_vals,
-        y_vals,
-        linestyle="-",
+    df_pareto = pd.DataFrame(pareto_rows).sort_values("delta").reset_index(drop=True)
+    df_pareto.to_csv(output_dir / "exp_pareto_tradeoff.csv", index=False)
+    pd.concat(runs_rows, ignore_index=True).to_csv(output_dir / "exp_pareto_tradeoff_runs.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.errorbar(
+        df_pareto["N_tx_mean"],
+        df_pareto["J_mean"],
+        xerr=df_pareto["N_tx_std"],
+        yerr=df_pareto["J_std"],
         marker="o",
-        color=color,
-        markerfacecolor=color,
-        markeredgecolor=color,
+        linestyle="-",
+        capsize=3,
     )
-    ax.set_xlabel("Communication usage: Number of updates N_tx")
-    ax.set_ylabel("Control performance: Quadratic cost J")
-    if y_vals.max() / max(y_vals.min(), 1e-9) > 10.0:
-        ax.set_yscale("log")
-    ax.grid(True, linestyle="--", linewidth=0.6, color="0.8")
-    mid_idx = len(x_vals) // 2
-    ax.annotate(
-        "Balanced operating point",
-        xy=(x_vals[mid_idx], y_vals[mid_idx]),
-        xytext=(10, 12),
-        textcoords="offset points",
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        arrowprops=dict(arrowstyle="->", color="0.3", lw=0.8),
-    )
+    ax.set_xlabel(r"Delivered updates $N_{\mathrm{tx}}$")
+    ax.set_ylabel(r"Quadratic cost $J(\delta)$")
+    ax.set_title("Performance–Communication Trade-off (Event-triggered)")
     save_figure(fig, output_dir / "fig_pareto_tradeoff.png")
 
-    log_step("Quantile bands across runs")
-    grouped = df_pareto_runs.groupby("delta", as_index=False)
-    q = grouped.agg(
-        J_q25=("J_cost", lambda s: np.quantile(s, 0.25)),
-        J_med=("J_cost", "median"),
-        J_q75=("J_cost", lambda s: np.quantile(s, 0.75)),
-        bits_q25=("bits_used", lambda s: np.quantile(s, 0.25)),
-        bits_med=("bits_used", "median"),
-        bits_q75=("bits_used", lambda s: np.quantile(s, 0.75)),
+    # -----------------------------------------
+    # (2) Time response (grow-and-reset in time)
+    # -----------------------------------------
+    delta_mid = float(df_pareto["delta"].iloc[len(df_pareto) // 2])
+    cfg_mid = SimConfig(**{**asdict(base), "delta": delta_mid, "seed": base.seed + 7})
+    df_time, _ = simulate_single_uav(cfg_mid, policy="event")
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.plot(df_time["k"], df_time["x_norm"], label=r"$\|x_k\|$")
+    ax.plot(df_time["k"], df_time["tilde_pred_norm"], label=r"$\|\tilde x^{pred}_k\|$")
+    ax.axhline(delta_mid, linestyle="--", linewidth=1.2, label=r"threshold $\delta$")
+    ax.set_xlabel("Time step $k$")
+    ax.set_ylabel("Norm")
+    ax.set_title("Grow-and-Reset Mechanism (Representative Run)")
+    ax.legend()
+    save_figure(fig, output_dir / "fig_time_response.png")
+
+    # ---------------------------------------------------
+    # (3) ET vs Periodic under matched communication usage
+    # ---------------------------------------------------
+    horizon = int(base.T_steps)
+    N_tx_et = float(df_pareto.loc[df_pareto["delta"] == delta_mid, "N_tx_mean"].iloc[0])
+    tx_rate = max(1e-6, N_tx_et / max(1, horizon))
+    M = int(max(1, round(1.0 / tx_rate)))
+
+    _, summ_et = monte_carlo_single(cfg_mid, policy="event", runs=30)
+    _, summ_per = monte_carlo_single(cfg_mid, policy="periodic", runs=30, periodic_M=M)
+
+    df_cmp = pd.DataFrame(
+        [
+            {"policy": "ET", "J_mean": summ_et["J_mean"], "J_std": summ_et["J_std"], "bits_mean": summ_et["bits_mean"]},
+            {"policy": f"PER (M={M})", "J_mean": summ_per["J_mean"], "J_std": summ_per["J_std"], "bits_mean": summ_per["bits_mean"]},
+        ]
     )
-    fig, axes = plt.subplots(2, 1, figsize=(7, 6.5), sharex=True)
-    axes[0].fill_between(q["delta"], q["J_q25"], q["J_q75"], alpha=0.2)
-    axes[0].plot(q["delta"], q["J_med"], marker="o")
-    axes[0].set_ylabel("Quadratic cost J")
-    axes[0].set_title("Event-triggered quantile bands (IQR)")
-    axes[0].grid(True)
-    axes[1].fill_between(q["delta"], q["bits_q25"], q["bits_q75"], alpha=0.2, color="tab:orange")
-    axes[1].plot(q["delta"], q["bits_med"], marker="o", color="tab:orange")
-    axes[1].set_xlabel("Event-trigger threshold delta")
-    axes[1].set_ylabel("Bits used (total)")
-    axes[1].grid(True)
-    axes[1].set_xscale("log")
-    save_figure(fig, output_dir / "fig_quantile_band.png")
+    df_cmp.to_csv(output_dir / "exp_periodic_comparison.csv", index=False)
 
-    log_step("Time-domain single rollout")
-    delta_mid = float(delta_list[len(delta_list) // 2])
-    cfg = SimConfig(**{**base.__dict__, "delta": delta_mid})
-    df, _ = simulate_single_uav(cfg, "event")
-    df = df.copy()
-    df["delta"] = delta_mid
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.bar(
+        [0, 1],
+        [summ_et["J_mean"], summ_per["J_mean"]],
+        yerr=[summ_et["J_std"], summ_per["J_std"]],
+        capsize=4,
+    )
+    ax.set_xticks([0, 1], ["ET", f"PER\n(M={M})"])
+    ax.set_ylabel(r"Quadratic cost $J$")
+    ax.set_title("ET vs Periodic (Matched Communication)")
+    save_figure(fig, output_dir / "fig_periodic_comparison.png")
 
-    time_rows = [df[["k", "delta", "tilde_norm", "x_norm", "tx"]]]
+    # -----------------------------------------
+    # (4) Robustness summary (noise/quant/loss)
+    # -----------------------------------------
+    robust_cfg = SimConfig(**asdict(base))
+    robust_cfg.mode = "robust"
+    robust_cfg.sigma_v = 0.05
+    robust_cfg.bits_per_value = 10
+    robust_cfg.p_loss_good = 0.05
+    robust_cfg.p_loss_bad = 0.30
+    robust_cfg.p_g2b = 0.02
+    robust_cfg.p_b2g = 0.20
 
-    fig, axes = plt.subplots(2, 1, figsize=(7.5, 6.5), sharex=True)
-    ax_err, ax_state = axes
-    ax_err.plot(df["k"], df["tilde_norm"], linestyle="-")
-    ax_err.axhline(delta_mid, linestyle="--", linewidth=1.0)
-    trigger_steps = df.loc[df["tx"] == 1, "k"].to_numpy()
-    for k in trigger_steps:
-        ax_err.axvline(k, linestyle="--", linewidth=0.7, color="0.7")
-    ax_err.set_ylabel(r"$\|\tilde{x}_k\|_2$")
-    ax_err.set_title("(a) Prediction error (grow-and-reset)")
-    ax_err.grid(True, linestyle="--", linewidth=0.6, color="0.8")
-
-    ax_state.plot(df["k"], df["x_norm"], linestyle="-")
-    ax_state.set_xlabel(r"Time step $k$")
-    ax_state.set_ylabel(r"$\|x_k\|_2$")
-    ax_state.set_title("(b) Closed-loop state response")
-    ax_state.grid(True, linestyle="--", linewidth=0.6, color="0.8")
-
-    save_figure(fig, output_dir / "fig_time_response.pdf")
-
-    if time_rows:
-        df_time = pd.concat(time_rows, ignore_index=True)
-        df_time.to_csv(output_dir / "exp_time_response.csv", index=False)
-
-    bits_list = [4, 6, 8, 10, 12]
+    deltas = np.array([0.05, 0.1, 0.2, 0.5, 1.0])
     rows = []
-    log_step("Quantization sweep")
-    for idx, b in enumerate(bits_list, start=1):
-        print(f"  bits {idx}/{len(bits_list)} = {b}")
-        cfg = SimConfig(**{**base.__dict__, "bits_per_value": b, "delta": 0.5})
-        _, summ = monte_carlo_single(cfg, "event", runs=30)
-        rows.append({"bits_per_value": b, **summ})
-    df_q = pd.DataFrame(rows)
-    df_q.to_csv(output_dir / "exp_quant_tradeoff.csv", index=False)
-
-    log_step("Quantization trade-off plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.errorbar(
-        df_q["bits_mean"],
-        df_q["rms_mean"],
-        yerr=df_q["rms_std"],
-        fmt="o-",
-        capsize=3,
-        color="tab:purple",
-    )
-    ax.set_xlabel("Average bits used (total)")
-    ax.set_ylabel("RMS tracking error (m)")
-    ax.set_title("Rate--distortion--control trade-off (quantization)")
-    ax.grid(True)
-    save_figure(fig, output_dir / "fig_quant_tradeoff.png")
-
-    budget_list = [200_000, 500_000, 1_000_000, 2_000_000]
-    budget_rows = []
-    log_step("Budget sweep")
-    for idx, budget in enumerate(budget_list, start=1):
-        print(f"  budget {idx}/{len(budget_list)} = {budget}")
-        cfg = SimConfig(**{**base.__dict__, "bit_budget_total": budget, "delta": 0.5})
-        _, summ = monte_carlo_single(cfg, "event", runs=30)
-        budget_rows.append(
+    for d in deltas:
+        c = SimConfig(**{**asdict(robust_cfg), "delta": float(d)})
+        _, s_et = monte_carlo_single(c, policy="event", runs=30)
+        M2 = int(max(1, round(1.0 / max(1e-6, s_et["tx_rate_mean"])) ))
+        _, s_per = monte_carlo_single(c, policy="periodic", runs=30, periodic_M=M2)
+        rows.append(
             {
-                "bit_budget_total": budget,
-                "J_mean": summ["J_mean"],
-                "J_std": summ["J_std"],
-                "bits_mean": summ["bits_mean"],
-                "rms_mean": summ["rms_mean"],
-                "N_tx_mean": summ["N_tx_mean"],
+                "delta": float(d),
+                "bits_et": s_et["bits_mean"],
+                "J_et": s_et["J_mean"],
+                "J_et_std": s_et["J_std"],
+                "bits_per": s_per["bits_mean"],
+                "J_per": s_per["J_mean"],
+                "J_per_std": s_per["J_std"],
+                "M_per": int(M2),
             }
         )
-    df_budget = pd.DataFrame(budget_rows)
-    df_budget.to_csv(output_dir / "exp_budget_tradeoff.csv", index=False)
+    df_rob = pd.DataFrame(rows).sort_values("bits_et").reset_index(drop=True)
+    df_rob.to_csv(output_dir / "exp_robustness_summary.csv", index=False)
 
-    log_step("Budget trade-off plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.errorbar(
-        df_budget["bits_mean"],
-        df_budget["J_mean"],
-        yerr=df_budget["J_std"],
-        fmt="o-",
-        capsize=3,
-        color="tab:red",
-    )
-    ax.set_xlabel("Average bits used (total)")
-    ax.set_ylabel("Quadratic cost J")
-    ax.set_title("Budget robustness (event-triggered)")
-    ax.grid(True)
-    save_figure(fig, output_dir / "fig_budget_tradeoff.png")
-
-    p_bad_list = [0.3, 0.5, 0.7]
-    burst_list = [(0.01, 0.2), (0.02, 0.1), (0.05, 0.05)]
-    rob_rows = []
-    log_step("Markov loss sweep")
-    for i, p_bad in enumerate(p_bad_list, start=1):
-        for j, (p_g2b, p_b2g) in enumerate(burst_list, start=1):
-            print(
-                f"  p_bad {i}/{len(p_bad_list)} = {p_bad}, "
-                f"burst {j}/{len(burst_list)} = ({p_g2b}, {p_b2g})"
-            )
-            cfg = SimConfig(
-                **{
-                    **base.__dict__,
-                    "p_loss_bad": p_bad,
-                    "p_g2b": p_g2b,
-                    "p_b2g": p_b2g,
-                    "delta": 0.5,
-                    "bits_per_value": 8,
-                }
-            )
-            _, summ = monte_carlo_single(cfg, "event", runs=30)
-            rob_rows.append({"p_loss_bad": p_bad, "p_g2b": p_g2b, "p_b2g": p_b2g, **summ})
-    df_rob = pd.DataFrame(rob_rows)
-    df_rob.to_csv(output_dir / "exp_markov_robustness.csv", index=False)
-
-    log_step("Markov robustness plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    sub = df_rob[df_rob["p_loss_bad"] == 0.5].copy()
-    sub["burst_len_proxy"] = 1.0 / (sub["p_b2g"] + 1e-12)
-    for (p_g2b, p_b2g) in burst_list:
-        s2 = sub[(sub["p_g2b"] == p_g2b) & (sub["p_b2g"] == p_b2g)]
-        if len(s2) == 0:
-            continue
-        ax.scatter(
-            s2["burst_len_proxy"],
-            s2["rms_mean"],
-            label=f"g2b={p_g2b}, b2g={p_b2g}",
-            s=50,
-        )
-    ax.set_xlabel("Bad-state burst length proxy (1/p_b2g)")
-    ax.set_ylabel("RMS tracking error (m)")
-    ax.set_title("Robustness under bursty Markov losses (p_bad=0.5)")
-    ax.grid(True)
-    ax.legend()
-    save_figure(fig, output_dir / "fig_markov_robustness.png")
-
-    robust_delta_list = delta_list[:8]
-    robust_M_list = [1, 2, 3, 5, 8, 10, 15, 20, 30, 40]
-    robust_rows = []
-    log_step("Robustness summary sweep (ET/PER)")
-    for idx, delta in enumerate(robust_delta_list, start=1):
-        print(f"  ET delta {idx}/{len(robust_delta_list)} = {float(delta)}")
-        cfg_event = SimConfig(
-            **{
-                **base.__dict__,
-                "delta": float(delta),
-                "sigma_v": 0.2,
-                "bits_per_value": 8,
-                "p_loss_good": 0.05,
-                "p_loss_bad": 0.5,
-                "p_g2b": 0.02,
-                "p_b2g": 0.1,
-            }
-        )
-        _, summ_event = monte_carlo_single(cfg_event, "event", runs=30)
-        robust_rows.append(
-            {
-                "scheme": "ET",
-                "param": float(delta),
-                "bits_mean": summ_event["bits_mean"],
-                "J_mean": summ_event["J_mean"],
-            }
-        )
-    for idx, M in enumerate(robust_M_list, start=1):
-        print(f"  PER M {idx}/{len(robust_M_list)} = {M}")
-        cfg_per = SimConfig(
-            **{
-                **base.__dict__,
-                "sigma_v": 0.2,
-                "bits_per_value": 8,
-                "p_loss_good": 0.05,
-                "p_loss_bad": 0.5,
-                "p_g2b": 0.02,
-                "p_b2g": 0.1,
-            }
-        )
-        _, summ_periodic = monte_carlo_single(cfg_per, "periodic", runs=30, periodic_M=M)
-        robust_rows.append(
-            {
-                "scheme": "PER",
-                "param": int(M),
-                "bits_mean": summ_periodic["bits_mean"],
-                "J_mean": summ_periodic["J_mean"],
-            }
-        )
-    df_robust = pd.DataFrame(robust_rows)
-    df_robust.to_csv(output_dir / "exp_robustness_summary.csv", index=False)
-    df_et = df_robust[df_robust["scheme"] == "ET"].sort_values("bits_mean")
-    df_per = df_robust[df_robust["scheme"] == "PER"].sort_values("bits_mean")
-    log_step("Robustness summary plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(
-        df_et["bits_mean"],
-        df_et["J_mean"],
-        linestyle="-",
-        marker="o",
-        label="Event-triggered (ET)",
-    )
-    ax.plot(
-        df_per["bits_mean"],
-        df_per["J_mean"],
-        linestyle="--",
-        marker="o",
-        markerfacecolor="none",
-        label="Periodic (PER)",
-    )
-    ax.set_xlabel(r"Average bits used $B(0{:}T)$")
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.errorbar(df_rob["bits_et"], df_rob["J_et"], yerr=df_rob["J_et_std"], marker="o", linestyle="-", capsize=3, label="ET")
+    ax.errorbar(df_rob["bits_per"], df_rob["J_per"], yerr=df_rob["J_per_std"], marker="s", linestyle="-", capsize=3, label="PER (matched)")
+    ax.set_xlabel("Total transmitted bits")
     ax.set_ylabel(r"Quadratic cost $J$")
-    ax.grid(True, linestyle="--", linewidth=0.6, color="0.8")
+    ax.set_title("Robustness: Noise + Quantization + Bursty Loss")
     ax.legend()
-    save_figure(fig, output_dir / "fig_robustness_summary.pdf")
-
-    candidate_M = [1, 2, 3, 5, 8, 10, 15, 20, 30, 40, 50]
-    per_rows = []
-    log_step("Periodic baseline sweep")
-    for idx, M in enumerate(candidate_M, start=1):
-        print(f"  M {idx}/{len(candidate_M)} = {M}")
-        _, summ_periodic = monte_carlo_single(base, "periodic", runs=30, periodic_M=M)
-        per_rows.append(
-            {
-                "M": M,
-                "J_mean": summ_periodic["J_mean"],
-                "bits_mean": summ_periodic["bits_mean"],
-                "updates_mean": summ_periodic["N_tx_mean"],
-            }
-        )
-    df_per = pd.DataFrame(per_rows)
-
-    et_rows = []
-    matched_rows = []
-    compare_delta_list = delta_list
-    log_step("ET vs PER matched budget sweep")
-    for idx, delta in enumerate(compare_delta_list, start=1):
-        print(f"  delta {idx}/{len(compare_delta_list)} = {float(delta)}")
-        cfg_event = SimConfig(**{**base.__dict__, "delta": float(delta)})
-        _, summ_event = monte_carlo_single(cfg_event, "event", runs=30)
-        et_rows.append(
-            {
-                "delta": float(delta),
-                "J_mean": summ_event["J_mean"],
-                "bits_mean": summ_event["bits_mean"],
-                "updates_mean": summ_event["N_tx_mean"],
-            }
-        )
-        diff = (df_per["bits_mean"] - summ_event["bits_mean"]).abs()
-        best_idx = int(diff.idxmin())
-        per_match = df_per.loc[best_idx]
-        matched_rows.append(
-            {
-                "delta": float(delta),
-                "M_star": int(per_match["M"]),
-                "bits_et": float(summ_event["bits_mean"]),
-                "bits_per": float(per_match["bits_mean"]),
-                "J_et": float(summ_event["J_mean"]),
-                "J_per": float(per_match["J_mean"]),
-                "updates_et": float(summ_event["N_tx_mean"]),
-                "updates_per": float(per_match["updates_mean"]),
-            }
-        )
-
-    df_et = pd.DataFrame(et_rows)
-    df_et.to_csv(output_dir / "exp_periodic_et.csv", index=False)
-    df_per.to_csv(output_dir / "exp_periodic_per.csv", index=False)
-    df_matched = pd.DataFrame(matched_rows)
-    df_matched.to_csv(output_dir / "exp_periodic_comparison.csv", index=False)
-
-    log_step("ET vs PER matched budget plot")
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    df_plot = df_matched.sort_values("bits_et")
-    ax.plot(
-        df_plot["bits_et"],
-        df_plot["J_et"],
-        linestyle="-",
-        marker="o",
-        color="tab:blue",
-        markerfacecolor="tab:blue",
-        markeredgecolor="tab:blue",
-        label="Event-triggered (ET)",
-    )
-    ax.plot(
-        df_plot["bits_per"],
-        df_plot["J_per"],
-        linestyle="--",
-        marker="o",
-        color="tab:orange",
-        markerfacecolor="white",
-        markeredgecolor="tab:orange",
-        label="Periodic (PER)",
-    )
-    ax.set_xlabel(r"Average bits used $B(0{:}T)$")
-    ax.set_ylabel(r"Quadratic cost $J$")
-    ax.grid(True, linestyle="--", linewidth=0.6, color="0.8")
-    ax.legend()
-    first = df_plot.iloc[0]
-    ax.annotate(
-        "ET dominates PER under matched budget",
-        xy=(first["bits_et"], first["J_et"]),
-        xytext=(12, 12),
-        textcoords="offset points",
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        arrowprops=dict(arrowstyle="->", color="0.3", lw=0.8),
-    )
-    save_figure(fig, output_dir / "fig_periodic_comparison.pdf")
-
-    baseline_delta = 0.5
-    cfg_event = SimConfig(**{**base.__dict__, "delta": baseline_delta})
-    _, summ_event = monte_carlo_single(cfg_event, "event", runs=30)
-    target_updates = max(1.0, summ_event["N_tx_mean"])
-    periodic_M = max(1, int(round(cfg_event.T_steps / target_updates)))
-    random_q = min(1.0, max(0.01, target_updates / cfg_event.T_steps))
-
-    base_rows = []
-    base_runs = []
-    log_step("Baseline policy comparisons")
-    for policy, kwargs in [
-        ("event", {}),
-        ("periodic", {"periodic_M": periodic_M}),
-        ("random", {"random_q": random_q}),
-    ]:
-        df_runs, s = monte_carlo_single(cfg_event, policy, runs=30, **kwargs)
-        df_runs = df_runs.copy()
-        df_runs["policy"] = policy
-        base_runs.append(df_runs)
-        base_rows.append(
-            {
-                "policy": policy,
-                "delta": baseline_delta,
-                "periodic_M": periodic_M if policy == "periodic" else np.nan,
-                "random_q": random_q if policy == "random" else np.nan,
-                **s,
-            }
-        )
-    df_base = pd.DataFrame(base_rows)
-    df_base.to_csv(output_dir / "exp_single_uav_baselines.csv", index=False)
-    df_runs = pd.concat(base_runs, ignore_index=True)
-    df_runs.to_csv(output_dir / "exp_single_uav_baseline_runs.csv", index=False)
-
-    log_step("Baseline bar charts")
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharex=True)
-    labels = df_base["policy"].str.capitalize()
-    x = np.arange(len(df_base))
-    axes[0].bar(x, df_base["J_mean"], yerr=df_base["J_std"], capsize=3, color="tab:blue")
-    axes[0].set_ylabel("Quadratic cost J")
-    axes[0].set_title("Baseline J (matched updates)")
-    axes[1].bar(x, df_base["rms_mean"], yerr=df_base["rms_std"], capsize=3, color="tab:green")
-    axes[1].set_ylabel("RMS tracking error (m)")
-    axes[1].set_title("Baseline RMS (matched updates)")
-    axes[2].bar(x, df_base["bits_mean"], yerr=df_base["bits_std"], capsize=3, color="tab:orange")
-    axes[2].set_ylabel("Average bits used (total)")
-    axes[2].set_title("Baseline bits (matched updates)")
-    for ax in axes:
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels)
-        ax.grid(axis="y")
-    save_figure(fig, output_dir / "fig_single_uav_baselines.png")
-
-    log_step("Baseline boxplots")
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=False)
-    policies = ["event", "periodic", "random"]
-    labels = [p.capitalize() for p in policies]
-    data_J = [df_runs.loc[df_runs["policy"] == p, "J_cost"] for p in policies]
-    data_rms = [df_runs.loc[df_runs["policy"] == p, "rms_err"] for p in policies]
-    data_bits = [df_runs.loc[df_runs["policy"] == p, "bits_used"] for p in policies]
-    axes[0].boxplot(data_J, labels=labels, patch_artist=True)
-    axes[0].set_ylabel("Quadratic cost J")
-    axes[0].set_title("Distribution of J")
-    axes[1].boxplot(data_rms, labels=labels, patch_artist=True)
-    axes[1].set_ylabel("RMS tracking error (m)")
-    axes[1].set_title("Distribution of RMS")
-    axes[2].boxplot(data_bits, labels=labels, patch_artist=True)
-    axes[2].set_ylabel("Bits used (total)")
-    axes[2].set_title("Distribution of bits")
-    for ax in axes:
-        ax.grid(axis="y")
-    save_figure(fig, output_dir / "fig_single_uav_boxplot.png")
-
-    log_step("Baseline scatter plot")
-    fig, ax = plt.subplots(figsize=(7, 4.8))
-    for policy, marker in [("event", "o"), ("periodic", "s"), ("random", "^")]:
-        sub = df_runs[df_runs["policy"] == policy]
-        ax.scatter(
-            sub["bits_used"],
-            sub["J_cost"],
-            alpha=0.6,
-            label=policy.capitalize(),
-            marker=marker,
-        )
-        front = pareto_front(sub["bits_used"].values, sub["J_cost"].values)
-        if len(front) > 0:
-            ax.plot(front[:, 0], front[:, 1], linewidth=2)
-    ax.set_xlabel("Bits used (total)")
-    ax.set_ylabel("Quadratic cost J")
-    ax.set_title("Cost vs communication (per-run scatter)")
-    ax.grid(True)
-    ax.legend()
-    save_figure(fig, output_dir / "fig_single_uav_scatter.png")
-
-    log_step("Baseline CDF plots")
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for policy in ["event", "periodic", "random"]:
-        sub = df_runs[df_runs["policy"] == policy]
-        for ax, col, title in [
-            (axes[0], "J_cost", "CDF of J"),
-            (axes[1], "rms_err", "CDF of RMS"),
-        ]:
-            vals = np.sort(sub[col].values)
-            cdf = np.arange(1, len(vals) + 1) / len(vals)
-            ax.plot(vals, cdf, label=policy.capitalize())
-            ax.set_title(title)
-            ax.grid(True)
-    axes[0].set_xlabel("Quadratic cost J")
-    axes[1].set_xlabel("RMS tracking error (m)")
-    axes[0].set_ylabel("CDF")
-    axes[0].legend()
-    save_figure(fig, output_dir / "fig_single_uav_cdf.png")
-
-    metrics = [
-        ("J_mean", "J (lower better)"),
-        ("rms_mean", "RMS (lower better)"),
-        ("bits_mean", "Bits (lower better)"),
-        ("tx_rate_mean", "Tx rate (lower better)"),
-        ("fail_rate", "Fail rate (lower better)"),
-    ]
-    vals = np.array([df_base[m[0]].values for m in metrics])
-    min_v = vals.min(axis=1, keepdims=True)
-    max_v = vals.max(axis=1, keepdims=True)
-    norm = (vals - min_v) / (max_v - min_v + 1e-12)
-    radar = 1.0 - norm
-    angles = np.linspace(0, 2 * np.pi, len(metrics), endpoint=False)
-    angles = np.r_[angles, angles[0]]
-    fig = plt.figure(figsize=(6.5, 6.5))
-    ax = fig.add_subplot(111, polar=True)
-    for idx, row in enumerate(df_base.itertuples(index=False)):
-        vals_r = np.r_[radar[:, idx], radar[0, idx]]
-        ax.plot(angles, vals_r, label=str(row.policy).capitalize())
-        ax.fill(angles, vals_r, alpha=0.12)
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels([m[1] for m in metrics])
-    ax.set_yticklabels([])
-    ax.set_title("Single-UAV multi-metric comparison (normalized)")
-    ax.legend(loc="upper right", bbox_to_anchor=(1.2, 1.1))
-    save_figure(fig, output_dir / "fig_single_uav_radar.png")
-
-    heat_delta = np.logspace(-2, 0.5, num=6)
-    heat_pbad = [0.1, 0.3, 0.5, 0.7, 0.9]
-    heat_rows = []
-    heat_grid = np.zeros((len(heat_pbad), len(heat_delta)))
-    log_step("Sensitivity heatmap sweep")
-    for i, p_bad in enumerate(heat_pbad, start=1):
-        for j, delta in enumerate(heat_delta, start=1):
-            print(
-                f"  p_bad {i}/{len(heat_pbad)} = {float(p_bad)}, "
-                f"delta {j}/{len(heat_delta)} = {float(delta)}"
-            )
-            cfg = SimConfig(
-                **{
-                    **base.__dict__,
-                    "delta": float(delta),
-                    "p_loss_bad": float(p_bad),
-                }
-            )
-            _, summ = monte_carlo_single(cfg, "event", runs=20)
-            heat_grid[i, j] = summ["rms_mean"]
-            heat_rows.append(
-                {
-                    "p_loss_bad": float(p_bad),
-                    "delta": float(delta),
-                    "rms_mean": summ["rms_mean"],
-                    "rms_std": summ["rms_std"],
-                    "J_mean": summ["J_mean"],
-                    "J_std": summ["J_std"],
-                    "bits_mean": summ["bits_mean"],
-                    "bits_std": summ["bits_std"],
-                }
-            )
-    df_heat = pd.DataFrame(heat_rows)
-    df_heat.to_csv(output_dir / "exp_sensitivity_heatmap.csv", index=False)
-
-    log_step("Sensitivity heatmap plot")
-    fig, ax = plt.subplots(figsize=(7.5, 4.8))
-    im = ax.imshow(heat_grid, cmap="viridis", aspect="auto")
-    ax.set_xticks(np.arange(len(heat_delta)))
-    ax.set_xticklabels([f"{d:.2f}" for d in heat_delta])
-    ax.set_yticks(np.arange(len(heat_pbad)))
-    ax.set_yticklabels([f"{p:.1f}" for p in heat_pbad])
-    ax.set_xlabel("Event-trigger threshold delta")
-    ax.set_ylabel("p_loss_bad")
-    ax.set_title("Sensitivity: RMS vs delta and p_loss_bad")
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("RMS tracking error (m)")
-    save_figure(fig, output_dir / "fig_sensitivity_heatmap.png")
+    save_figure(fig, output_dir / "fig_robustness_summary.png")
 
     print(
-        "Saved figures & CSVs:",
-        "fig_pareto_tradeoff.png, fig_quantile_band.png, fig_time_response.pdf, fig_quant_tradeoff.png, fig_budget_tradeoff.png, fig_markov_robustness.png, fig_robustness_summary.pdf, fig_periodic_comparison.pdf, fig_single_uav_baselines.png, fig_single_uav_boxplot.png, fig_single_uav_scatter.png, fig_single_uav_cdf.png, fig_single_uav_radar.png, fig_sensitivity_heatmap.png",
-        "exp_pareto_tradeoff.csv, exp_pareto_tradeoff_runs.csv, exp_time_response.csv, exp_quant_tradeoff.csv, exp_budget_tradeoff.csv, exp_markov_robustness.csv, exp_periodic_comparison.csv, exp_single_uav_baselines.csv, exp_single_uav_baseline_runs.csv, exp_sensitivity_heatmap.csv",
+        "Saved 4 paper figures:",
+        "fig_pareto_tradeoff, fig_time_response, fig_periodic_comparison, fig_robustness_summary",
     )

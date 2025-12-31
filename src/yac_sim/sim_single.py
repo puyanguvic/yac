@@ -10,15 +10,29 @@ from .utils import clip_u, packet_bits
 
 
 def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
-    """
-    policy:
-      - 'event': send if ||y-x_hat_pred|| > delta
+    """Simulate a single UAV tracking a lawnmower reference under communication constraints.
+
+    This function supports two analysis modes:
+
+    - cfg.mode == "theory":
+        Matches the paper baseline abstraction:
+          * perfect measurement y_k = x_k
+          * if a transmission is attempted, it is delivered (no loss)
+          * upon receiving an update, the controller-side estimate is reset to truth
+            (x_hat_k = x_k), yielding an explicit grow-and-reset prediction error.
+
+    - cfg.mode == "robust":
+        Uses measurement noise, quantization, and Gilbert–Elliott packet loss.
+
+    Policies:
+      - 'event': send if ||tilde_pred|| > delta, where tilde_pred = x - x_hat_pred
       - 'periodic': send every M steps
       - 'random': send with prob q
-    channel: Gilbert-Elliott
-    budget: bit_budget_total
-    payload: send 4 values (state measurement)
     """
+    # Normalize mode switches if user didn't set the flags explicitly
+    if hasattr(cfg, "normalize_modes"):
+        cfg.normalize_modes()
+
     rng = np.random.default_rng(cfg.seed)
     A, B, C = build_double_integrator(cfg.Ts)
     K, _ = dlqr(A, B, cfg.Q, cfg.R)
@@ -41,16 +55,15 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
     )
 
     x = np.zeros(4)
-    x[0], x[2] = 5.0, 5.0
-    x_hat = x.copy()
+    x_hat = np.zeros(4)
     u_prev = np.zeros(2)
 
     bits_used = 0
     N_tx_attempt = 0
     N_tx_delivered = 0
     qerr_acc = 0.0
-    J_cost = 0.0
 
+    J_cost = 0.0
     consecutive_bad = 0
     failed = False
 
@@ -58,24 +71,33 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
 
     for k in range(cfg.T_steps):
         chan.step()
-        y = (C @ x) + rng.normal(0.0, cfg.sigma_v, size=4)
 
+        # ---- measurement (paper baseline uses perfect state) ----
+        if cfg.ideal_measurement:
+            y = (C @ x)
+        else:
+            y = (C @ x) + rng.normal(0.0, cfg.sigma_v, size=4)
+
+        # ---- controller-side prediction ----
         x_hat_pred = A @ x_hat + B @ u_prev
+        tilde_pred = x - x_hat_pred  # prediction error before (potential) update
 
+        # ---- bits per value (optional adaptive coding) ----
         bpv = cfg.bits_per_value
-        if cfg.adaptive_bits:
+        if getattr(cfg, "adaptive_bits", False):
             bpv = 6 if chan.state == 1 else cfg.bits_per_value
 
-        do_tx = False
+        # ---- decide whether to transmit ----
         if policy == "event":
-            do_tx = np.linalg.norm(y - x_hat_pred) > cfg.delta
+            do_tx = np.linalg.norm(tilde_pred) > cfg.delta
         elif policy == "periodic":
-            do_tx = k % periodic_M == 0
+            do_tx = (k % periodic_M) == 0
         elif policy == "random":
             do_tx = rng.random() < random_q
         else:
             raise ValueError("Unknown policy")
 
+        # ---- transmission + reception ----
         received = False
         loss_p = cfg.p_loss_good if chan.state == 0 else cfg.p_loss_bad
 
@@ -84,22 +106,32 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
             if bits_used + pkt_bits <= cfg.bit_budget_total:
                 bits_used += pkt_bits
                 N_tx_attempt += 1
-                received, _, _ = chan.transmit()
+
+                if cfg.ideal_comm:
+                    received = True
+                else:
+                    received, _, _ = chan.transmit()
             else:
                 do_tx = False
 
+        # ---- estimator update (grow-and-reset lives here) ----
         if received:
             N_tx_delivered += 1
-            yq, qe = uniform_quantize(y, bits=bpv, x_min=-50.0, x_max=50.0)
-            qerr_acc += qe
-            x_hat = yq.copy()
+
+            if cfg.ideal_quant:
+                x_hat = x.copy()  # reset to truth (paper baseline)
+            else:
+                # In the robust mode, we treat the payload as the measurement (possibly quantized).
+                yq, qe = uniform_quantize(y, bits=bpv, x_min=-50.0, x_max=50.0)
+                qerr_acc += qe
+                x_hat = yq.copy()
         else:
             x_hat = x_hat_pred
 
+        # After update (or not), define the realized prediction error
         tilde = x - x_hat
-        x_norm = float(np.linalg.norm(x))
-        tilde_norm = float(np.linalg.norm(tilde))
 
+        # ---- control ----
         e_hat = x_hat - x_ref[k]
         u = (-K @ e_hat.reshape(-1, 1)).flatten()
         u = clip_u(u, cfg.u_max)
@@ -107,8 +139,13 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
         e_true = x - x_ref[k]
         J_cost += float(e_true.T @ cfg.Q @ e_true + u.T @ cfg.R @ u)
 
+        # ---- plant step ----
         x = A @ x + B @ u
+        if getattr(cfg, "sigma_w", 0.0) > 0.0:
+            x = x + rng.normal(0.0, cfg.sigma_w, size=4)
+        u_prev = u
 
+        # ---- failure metric ----
         pos_err = float(np.linalg.norm(x[[0, 2]] - x_ref[k][[0, 2]]))
         if pos_err > cfg.fail_err:
             consecutive_bad += 1
@@ -120,15 +157,16 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
         rows.append(
             {
                 "k": k,
-                "px": x[0],
-                "py": x[2],
-                "px_ref": x_ref[k][0],
-                "py_ref": x_ref[k][2],
+                "px": float(x[0]),
+                "py": float(x[2]),
+                "px_ref": float(x_ref[k][0]),
+                "py_ref": float(x_ref[k][2]),
                 "pos_err": pos_err,
-                "x_norm": x_norm,
-                "tilde_norm": tilde_norm,
-                "ux": u[0],
-                "uy": u[1],
+                "x_norm": float(np.linalg.norm(x)),
+                "tilde_pred_norm": float(np.linalg.norm(tilde_pred)),
+                "tilde_norm": float(np.linalg.norm(tilde)),
+                "ux": float(u[0]),
+                "uy": float(u[1]),
                 "tx": int(do_tx),
                 "rx": int(received),
                 "chan_state": int(chan.state),
@@ -137,7 +175,6 @@ def simulate_single_uav(cfg, policy: str, periodic_M=1, random_q=1.0):
                 "bpv": int(bpv),
             }
         )
-        u_prev = u
 
     df = pd.DataFrame(rows)
     rms = math.sqrt(float(np.mean(df["pos_err"].values**2)))
