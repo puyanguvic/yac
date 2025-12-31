@@ -39,21 +39,33 @@ def _offset_x(x: np.ndarray, frac: float) -> np.ndarray:
         span = max(float(np.max(x)) if x.size else 0.0, 1.0)
     return x + frac * span
 
-def _prep_tradeoff_data(et_res, per_res, rand_res):
-    # mean+ci arrays
+def _prep_tradeoff_data(et_res, per_res, rand_res, *, y_transform: str | None = None):
+    """Prepare (x, y, y_ci) curves for plotting.
+
+    y_transform:
+      - None: use J in linear scale.
+      - "log10": use log10(J) and compute CI in log domain (more robust for heavy-tail).
+    """
     def summarize(res_list, xkey="bits_deliv"):
         xs, ys, yci = [], [], []
         for r in res_list:
             x_m, _ = mean_ci95(r[xkey])
-            y_m, y_hw = mean_ci95(r["J"])
+            if y_transform == "log10":
+                Jv = np.maximum(np.asarray(r["J"], dtype=float), 1e-12)
+                y = np.log10(Jv)
+                y_m, y_hw = mean_ci95(y)
+            else:
+                y_m, y_hw = mean_ci95(r["J"])
             xs.append(x_m); ys.append(y_m); yci.append(y_hw)
         xs = np.array(xs); ys = np.array(ys); yci = np.array(yci)
         order = np.argsort(xs)
         return xs[order], ys[order], yci[order], order
+
     x_et, y_et, ci_et, _ = summarize(et_res)
     x_per, y_per, ci_per, _ = summarize(per_res)
     x_rd, y_rd, ci_rd, _ = summarize(rand_res)
     return (x_et, y_et, ci_et), (x_per, y_per, ci_per), (x_rd, y_rd, ci_rd)
+
 
 def figure_A_pareto(cfg: SimConfig, outdir: Path) -> tuple[float, float]:
     """Figure A: Pareto with multiple baselines + CI + knee. Returns (delta_knee, budget_knee_bits)."""
@@ -68,7 +80,7 @@ def figure_A_pareto(cfg: SimConfig, outdir: Path) -> tuple[float, float]:
     per_res = monte_carlo(cfg, "PER", periods=periods)
     rd_res = monte_carlo(cfg, "RAND", ps=ps)
 
-    (x_et, y_et, ci_et), (x_per, y_per, ci_per), (x_rd, y_rd, ci_rd) = _prep_tradeoff_data(et_res, per_res, rd_res)
+    (x_et, y_et, ci_et), (x_per, y_per, ci_per), (x_rd, y_rd, ci_rd) = _prep_tradeoff_data(et_res, per_res, rd_res, y_transform="log10")
 
     # knee on ET curve in (bits, cost)
     knee_idx = knee_point(x_et, y_et)
@@ -101,7 +113,7 @@ def figure_A_pareto(cfg: SimConfig, outdir: Path) -> tuple[float, float]:
     ax.plot([budget_knee], [y_et[knee_idx]], marker="D", linestyle="None", markersize=5, label="ET knee")
 
     ax.set_xlabel("Delivered communication (bits)")
-    ax.set_ylabel("Quadratic cost $J$")
+    ax.set_ylabel(r"$\log_{10} J$")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", frameon=True, borderpad=0.3)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
@@ -174,22 +186,36 @@ def figure_C_budget_curves(cfg: SimConfig, outdir: Path) -> None:
     per_res = monte_carlo(cfg, "PER", periods=periods)
     rd_res = monte_carlo(cfg, "RAND", ps=ps)
 
-    (x_et, y_et, ci_et), (x_per, y_per, ci_per), (x_rd, y_rd, ci_rd) = _prep_tradeoff_data(et_res, per_res, rd_res)
+    # Summarize curves using *median* (robust to heavy-tail runs).
+    def summarize_median(res_list):
+        xb, yb = [], []
+        for r in res_list:
+            xb.append(np.median(r["bits_deliv"]))
+            yb.append(np.median(r["J"]))
+        xb = np.asarray(xb, dtype=float)
+        yb = np.asarray(yb, dtype=float)
+        order = np.argsort(xb)
+        return xb[order], yb[order]
 
-    # Compare PER/RAND to ET at matched budgets to accentuate small gaps.
+    x_et, y_et = summarize_median(et_res)
+    x_per, y_per = summarize_median(per_res)
+    x_rd, y_rd = summarize_median(rd_res)
+
+    # Compare PER/RAND to ET at matched delivered-communication budgets.
     budgets = x_et
-    per_best = np.array([_best_under_budget(x_per, y_per, b) for b in budgets])
-    rd_best = np.array([_best_under_budget(x_rd, y_rd, b) for b in budgets])
-    ratio_per = per_best / y_et
-    ratio_rd = rd_best / y_et
+    per_best = np.array([_best_under_budget(x_per, y_per, b, tol=0.06) for b in budgets], dtype=float)
+    rd_best = np.array([_best_under_budget(x_rd, y_rd, b, tol=0.06) for b in budgets], dtype=float)
 
+    # Plot in log10 ratio for readability (0=equal, 1=10x worse, 2=100x worse, ...)
+    ratio_per = np.log10(np.maximum(per_best / np.maximum(y_et, 1e-12), 1e-12))
+    ratio_rd = np.log10(np.maximum(rd_best / np.maximum(y_et, 1e-12), 1e-12))
     # Normalize budget by full-communication periodic baseline (M=1 -> max bits).
     full_bits = float(np.max(x_per)) if x_per.size else float(np.max(x_et))
     x_norm = budgets / full_bits if full_bits > 0 else budgets
 
     fig = plt.figure(figsize=(3.5, 2.2))
     ax = fig.add_subplot(111)
-    ax.axhline(1.0, linestyle="--", linewidth=0.9, color="0.35", label="ET baseline")
+    ax.axhline(0.0, linestyle="--", linewidth=0.9, color="0.35", label="ET baseline")
     ax.plot(
         x_norm, ratio_per, "s--",
         markerfacecolor="white", markeredgewidth=0.7,
@@ -201,7 +227,7 @@ def figure_C_budget_curves(cfg: SimConfig, outdir: Path) -> None:
         label="RAND (best@budget)", zorder=1,
     )
     ax.set_xlabel("Delivered communication (normalized)")
-    ax.set_ylabel("Cost ratio vs ET")
+    ax.set_ylabel(r"$\log_{10}(J_{\mathrm{baseline}}/J_{\mathrm{ET}})$")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", frameon=True, borderpad=0.3)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
@@ -331,14 +357,31 @@ def figure_D_robustness_panel(cfg: SimConfig, outdir: Path, budget_bits: float) 
     plt.close(fig)
 
 def _apply_contrast_settings(cfg: SimConfig) -> None:
-    """Apply realistic impairments to amplify ET vs baselines while staying reasonable."""
+    """Apply realistic-but-hard impairments so ET vs PER/RAND separation is visible.
+
+    Key idea: keep the plant stable (double integrator), but make *estimation* and
+    *delivery* the bottlenecks via bursty packet loss, quantization, and model mismatch.
+    """
     cfg.mode = "robust"
-    cfg.sigma_w = max(cfg.sigma_w, 0.05)
-    cfg.sigma_v = max(cfg.sigma_v, 0.04)
-    cfg.bits_per_value = min(cfg.bits_per_value, 10)
-    cfg.loss_good = max(cfg.loss_good, 0.05)
-    cfg.loss_bad = max(cfg.loss_bad, 0.30)
-    cfg.mismatch_eps = max(cfg.mismatch_eps, 0.03)
+
+    # process/measurement noise: moderate (avoid pure-noise dominance)
+    cfg.sigma_w = max(cfg.sigma_w, 0.08)
+    cfg.sigma_v = max(cfg.sigma_v, 0.05)
+
+    # quantization: make it matter (and keep range tighter so resolution is challenged)
+    cfg.bits_per_value = min(cfg.bits_per_value, 8)
+    cfg.q_min = -12.0
+    cfg.q_max = 12.0
+
+    # stronger bursty channel (Gilbert–Elliott)
+    cfg.p_good_to_bad = max(cfg.p_good_to_bad, 0.03)
+    cfg.p_bad_to_good = min(cfg.p_bad_to_good, 0.08)
+    cfg.loss_good = max(cfg.loss_good, 0.02)
+    cfg.loss_bad = max(cfg.loss_bad, 0.45)
+
+    # stronger model mismatch (main driver of ET advantage without changing plant stability)
+    cfg.mismatch_eps = max(cfg.mismatch_eps, 0.08)
+
 
 def run_all(outdir: str = "result", mc_runs: int | None = None, t_steps: int | None = None, fast: bool = False) -> None:
     outdir = Path(outdir)

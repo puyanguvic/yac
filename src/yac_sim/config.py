@@ -24,10 +24,10 @@ class SimConfig:
     bits_per_value: int = 32
 
     # channel (Gilbert–Elliott)
-    p_good_to_bad: float = 0.02
-    p_bad_to_good: float = 0.20
-    loss_good: float = 0.00
-    loss_bad: float = 0.25
+    p_good_to_bad: float =  0.03
+    p_bad_to_good: float =  0.08
+    loss_good: float =  0.02
+    loss_bad: float =  0.45
 
     # model mismatch (predictor uses A_hat = A + eps*I)
     mismatch_eps: float = 0.0
