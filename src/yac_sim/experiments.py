@@ -177,8 +177,9 @@ def figure_B_time_response(cfg: SimConfig, outdir: Path, delta_knee: float) -> N
     inset.set_title("innovation", fontsize=8)
     inset.set_xticks([])
     inset.set_yticks([])
+    inset.set_in_layout(False)
 
-    fig.tight_layout(pad=0.3)
+    fig.subplots_adjust(hspace=0.35, left=0.14, right=0.98, bottom=0.12, top=0.95)
     savefig(fig, outdir, "fig_B_time_response")
 
 def figure_C_budget_curves(cfg: SimConfig, outdir: Path) -> None:
