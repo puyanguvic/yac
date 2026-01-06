@@ -350,7 +350,7 @@ def figure_D_oracle_comparison(cfg: SimConfig, outdir: Path) -> None:
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
     fig.tight_layout(pad=0.6)
-    savefig(fig, outdir, "fig_D_oracle_comparison")
+    savefig(fig, outdir, "fig_D_oracle")
     plt.close(fig)
 
 
