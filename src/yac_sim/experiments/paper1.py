@@ -122,14 +122,14 @@ def figure_A_pareto(cfg: SimConfig, outdir: Path) -> float:
     ax1.set_xlabel("Delivered updates")
     ax1.set_ylabel(r"$J_x$")
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim(0, 250)
+    ax1.set_xlim(0, 150)
     ax1.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax1.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
     ax2.set_xlabel("Delivered updates")
     ax2.set_ylabel(r"$E_u$")
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, 250)
+    ax2.set_xlim(0, 150)
     ax2.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax2.yaxis.set_major_locator(MaxNLocator(nbins=5))
 
