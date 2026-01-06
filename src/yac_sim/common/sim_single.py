@@ -185,7 +185,7 @@ def monte_carlo(
 ) -> list[dict]:
     """Run Monte Carlo for a sweep of a single policy knob.
 
-    Returns a list of dicts, one per sweep point, matching the plotting helpers in experiments.py.
+    Returns a list of dicts, one per sweep point, matching the plotting helpers in experiments/paper1.py.
     Each dict contains:
       - param: sweep value (delta / period / p)
       - J: array of total LQR costs over MC runs

@@ -1,6 +1,6 @@
 YAC / SCC simulation code (paper-aligned)
 
-Run:
+Run (paper 1 experiments):
   python -m yac_sim --outdir result
 
 Key notes:

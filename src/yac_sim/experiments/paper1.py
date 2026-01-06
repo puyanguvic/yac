@@ -6,10 +6,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
-from .config import SimConfig
-from .models import double_integrator_2d
-from .sim_single import simulate, monte_carlo
-from .utils import mean_ci95, knee_point
+from ..common.config import SimConfig
+from ..common.models import double_integrator_2d
+from ..common.sim_single import simulate, monte_carlo
+from ..common.utils import mean_ci95, knee_point
 
 
 def apply_ieee_style() -> None:

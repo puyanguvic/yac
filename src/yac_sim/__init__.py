@@ -1,3 +1,3 @@
 
-"""Event-triggered SCC simulation package (paper-4-figs, richer baselines)."""
+"""Event-triggered SCC simulation package with paper-specific experiment suites."""
 __all__ = []

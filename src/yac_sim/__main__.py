@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 import argparse
-from .experiments import run_all
+from .experiments.paper1 import run_all
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run YAC simulation experiments.")
